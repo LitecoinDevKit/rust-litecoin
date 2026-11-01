@@ -31,6 +31,27 @@ pub(crate) fn ensure_index<T: Default>(vec: &mut Vec<T>, index: usize) {
     }
 }
 
+/// Most MWEB inputs a consensus-valid transaction can carry (Core `mw::MAX_NUM_INPUTS`).
+pub const MAX_MWEB_PSBT_INPUTS: usize = 50_000;
+/// Most MWEB outputs: Core `mw::MAX_BLOCK_WEIGHT` (200,000) over the lightest output (17).
+pub const MAX_MWEB_PSBT_OUTPUTS: usize = 200_000 / 17;
+/// Most MWEB kernels: Core `mw::MAX_BLOCK_WEIGHT` over the lightest kernel (2).
+pub const MAX_MWEB_PSBT_KERNELS: usize = 200_000 / 2;
+
+/// [`ensure_index`] for an index read from an untrusted key: the index sizes an allocation, so
+/// anything a valid MWEB transaction cannot reach is refused.
+pub(crate) fn ensure_index_bounded<T: Default>(
+    vec: &mut Vec<T>,
+    index: usize,
+    max_len: usize,
+) -> Result<(), ()> {
+    if index >= max_len {
+        return Err(());
+    }
+    ensure_index(vec, index);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,6 +62,38 @@ mod tests {
     fn test_pubkey(seed: u8) -> Vec<u8> {
         let sk = SecretKey::from_slice(&[seed; 32]).expect("valid secret");
         sk.public_key(&Secp256k1::new()).serialize().to_vec()
+    }
+
+    /// The map index in a global MWEB key sizes an allocation, so an index no valid MWEB
+    /// transaction can reach must be refused instead of materialising ~4.3e9 empty maps.
+    #[test]
+    fn decode_rejects_mweb_map_index_beyond_consensus_limits() {
+        use crate::blockdata::transaction::{Transaction, Version};
+        use crate::psbt::Psbt;
+
+        let unsigned = Transaction {
+            version: Version::TWO,
+            lock_time: crate::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+            mw_tx: None,
+            is_hog_ex: false,
+        };
+        let cases = [
+            (MWEB_GLOBAL_KERNEL_FIELD_TYPE, MAX_MWEB_PSBT_KERNELS, vec![0x00]),
+            (MWEB_GLOBAL_OUTPUT_FIELD_TYPE, MAX_MWEB_PSBT_OUTPUTS, vec![0x00]),
+            (MWEB_SPENT_OUTPUT_ID_TYPE, MAX_MWEB_PSBT_INPUTS, vec![]),
+        ];
+        for (type_value, max, field) in cases {
+            for (idx, ok) in [(max as u32 - 1, true), (max as u32, false), (u32::MAX, false)] {
+                let mut psbt = Psbt::from_unsigned_tx(unsigned.clone()).unwrap();
+                let mut key = idx.to_le_bytes().to_vec();
+                key.extend(&field);
+                psbt.unknown.insert(raw::Key { type_value, key }, vec![0u8; 32]);
+                let decoded = Psbt::deserialize(&psbt.serialize());
+                assert_eq!(decoded.is_ok(), ok, "type {type_value:#04x} index {idx}");
+            }
+        }
     }
 
     #[test]

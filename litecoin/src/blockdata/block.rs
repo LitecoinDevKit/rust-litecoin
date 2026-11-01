@@ -337,14 +337,11 @@ pub struct Block {
     pub mweb_block: Option<MwebBlock>,
 }
 
-/// Block-header version bit that signals the presence of an MWEB extension block.
-/// Matches `mwebVer` in ltcsuite (`wire/msgblock.go`).
-const MWEB_VERSION_BIT: i32 = 0x2000_0000;
-
-fn block_carries_mweb(version: Version, txdata: &[Transaction]) -> bool {
-    txdata.len() >= 2
-        && (version.to_consensus() & MWEB_VERSION_BIT) != 0
-        && txdata.last().map(|t| t.is_hog_ex).unwrap_or(false)
+/// Whether a block's serialization carries the MWEB presence byte (Core `CBlock::SerializationOp`):
+/// two or more transactions, the last a HogEx. The header version plays no part; consensus only
+/// requires `nVersion >= 0x20000000`, so a valid MWEB block may have bit 29 clear.
+fn block_carries_mweb(txdata: &[Transaction]) -> bool {
+    txdata.len() >= 2 && txdata.last().map(|t| t.is_hog_ex).unwrap_or(false)
 }
 
 impl Encodable for Block {
@@ -352,9 +349,7 @@ impl Encodable for Block {
         let mut len = 0;
         len += self.header.consensus_encode(w)?;
         len += self.txdata.consensus_encode(w)?;
-        // Only blocks that signal MWEB via the header version bit AND end with a HogEx
-        // transaction may carry an MWEB extension. Without both, the presence byte is omitted.
-        if block_carries_mweb(self.header.version, &self.txdata) {
+        if block_carries_mweb(&self.txdata) {
             match &self.mweb_block {
                 Some(mw) => {
                     len += 1u8.consensus_encode(w)?;
@@ -379,7 +374,7 @@ impl Decodable for Block {
         if txdata.iter().take(txdata.len().saturating_sub(1)).any(|t| t.is_hog_ex) {
             return Err(encode::Error::ParseFailed("HogEx must be the last transaction"));
         }
-        let mweb_block = if block_carries_mweb(header.version, &txdata) {
+        let mweb_block = if block_carries_mweb(&txdata) {
             let present = u8::consensus_decode_from_finite_reader(r)?;
             if present != 0 {
                 Some(MwebBlock::consensus_decode_from_finite_reader(r)?)

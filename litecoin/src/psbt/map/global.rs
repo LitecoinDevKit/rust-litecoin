@@ -290,14 +290,24 @@ impl Psbt {
                                 as usize;
                             let field_ty = pair.key.key[4];
                             let key_data = &pair.key.key[5..];
-                            mweb::ensure_index(&mut mweb_kernels, idx);
+                            mweb::ensure_index_bounded(
+                                &mut mweb_kernels,
+                                idx,
+                                mweb::MAX_MWEB_PSBT_KERNELS,
+                            )
+                            .map_err(|()| Error::InvalidKey(pair.key.clone()))?;
                             mweb_kernels[idx].apply_field(field_ty, key_data, &pair.value);
                         }
                         MWEB_GLOBAL_OUTPUT_FIELD_TYPE if pair.key.key.len() == 5 => {
                             let idx = u32::from_le_bytes(pair.key.key[..4].try_into().unwrap())
                                 as usize;
                             let field_ty = pair.key.key[4];
-                            mweb::ensure_index(&mut mweb_outputs, idx);
+                            mweb::ensure_index_bounded(
+                                &mut mweb_outputs,
+                                idx,
+                                mweb::MAX_MWEB_PSBT_OUTPUTS,
+                            )
+                            .map_err(|()| Error::InvalidKey(pair.key.clone()))?;
                             mweb_outputs[idx].apply_field(field_ty, &pair.value);
                         }
                         ty if (MWEB_INPUT_FIELD_MIN..=MWEB_INPUT_FIELD_MAX).contains(&ty)
@@ -306,7 +316,12 @@ impl Psbt {
                             let idx = u32::from_le_bytes(pair.key.key[..4].try_into().unwrap())
                                 as usize;
                             let key_data = &pair.key.key[4..];
-                            mweb::ensure_index(&mut mweb_inputs, idx);
+                            mweb::ensure_index_bounded(
+                                &mut mweb_inputs,
+                                idx,
+                                mweb::MAX_MWEB_PSBT_INPUTS,
+                            )
+                            .map_err(|()| Error::InvalidKey(pair.key.clone()))?;
                             mweb_inputs[idx].apply_kv_field(ty, key_data, &pair.value);
                         }
                         _ => match unknowns.entry(pair.key) {

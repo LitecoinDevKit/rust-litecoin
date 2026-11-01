@@ -99,13 +99,14 @@ pub(crate) fn wire_output_from_map(out: &MwebOutput) -> Result<Output, Error> {
             .as_ref()
             .ok_or(Error::IncompleteMwebMaps("output map missing output_pubkey"))?,
     )
-    .map_err(|_| Error::InvalidSecp256k1PublicKey(secp256k1::Error::InvalidPublicKey))?;
+    .map_err(|_| Error::InvalidSecp256k1PublicKey(secp256k1::Error::InvalidPublicKey))?
+    .serialize();
     let features = out.features.unwrap_or(0);
     let standard_fields = match &out.standard_fields {
         Some(blob) if blob.len() >= 33 + 1 + 8 + 16 => {
-            let ke = PublicKey::from_slice(&blob[..33]).map_err(|_| {
-                Error::InvalidSecp256k1PublicKey(secp256k1::Error::InvalidPublicKey)
-            })?;
+            let ke = PublicKey::from_slice(&blob[..33])
+                .map_err(|_| Error::InvalidSecp256k1PublicKey(secp256k1::Error::InvalidPublicKey))?
+                .serialize();
             let view_tag = blob[33];
             let masked_value = u64::from_le_bytes(blob[34..42].try_into().unwrap());
             let mut masked_nonce = [0u8; 16];

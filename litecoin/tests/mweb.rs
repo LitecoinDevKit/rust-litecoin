@@ -169,12 +169,29 @@ fn hogex_block_decodes_and_roundtrips() {
     assert_eq!(std_fields.view_tag, 156);
     assert_eq!(std_fields.masked_value, 5_350_801_249_539_001_306);
     assert_eq!(
-        output.receiver_public_key,
+        output.receiver_key().unwrap(),
         hex_pubkey("0333c3e2213250cfa1741083d6ebfbcdbe40008fc8c6a58ca4234adf77bb484458")
     );
 
     // Full round-trip.
     assert_eq!(serialize(&block), block_bytes, "block round-trip mismatch");
+}
+
+/// Core reads the MWEB extension block whenever the last transaction is a HogEx; the header
+/// version bit 29 plays no part, and `0x40000000` is a valid block version. The same mainnet block
+/// with that version must still decode its extension block and round-trip.
+#[test]
+fn hogex_block_without_version_bit_29_decodes() {
+    let mut block_bytes =
+        Vec::<u8>::from_hex(include_str!("data/hogex_block.txt").trim()).expect("hex");
+    let original: Block = deserialize(&block_bytes).expect("decode hogex block");
+    block_bytes[..4].copy_from_slice(&0x4000_0000i32.to_le_bytes());
+
+    let block: Block = deserialize(&block_bytes).expect("decode block with bit 29 clear");
+    assert_eq!(block.header.version.to_consensus(), 0x4000_0000);
+    assert_eq!(block.mweb_block, original.mweb_block);
+    assert!(block.mweb_block.is_some());
+    assert_eq!(serialize(&block), block_bytes);
 }
 
 /// Synthesizes a transaction carrying BOTH a witness input and an MWEB body, exercising the

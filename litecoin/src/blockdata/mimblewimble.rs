@@ -41,10 +41,22 @@ pub enum OutputFeatures {
 /// Standard "encrypted" fields embedded in an [`OutputMessage`].
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct OutputMessageStandardFields {
-    pub key_exchange_pubkey: PublicKey,
+    /// Key-exchange key `Ke`, as raw compressed bytes.
+    ///
+    /// Litecoin Core consensus never checks that `Ke` is a curve point (only relay policy
+    /// does), so a valid block can carry one that is not. Parse with
+    /// [`Self::key_exchange_key`].
+    pub key_exchange_pubkey: [u8; 33],
     pub view_tag: u8,
     pub masked_value: u64,
     pub masked_nonce: [u8; 16],
+}
+
+impl OutputMessageStandardFields {
+    /// `Ke` as a curve point; fails for encodings that are not one.
+    pub fn key_exchange_key(&self) -> Result<PublicKey, secp256k1::Error> {
+        PublicKey::from_slice(&self.key_exchange_pubkey)
+    }
 }
 
 /// Encrypted/embedded payload of an MWEB [`Output`].
@@ -60,10 +72,21 @@ pub struct OutputMessage {
 pub struct Output {
     pub commitment: [u8; 33],
     pub sender_public_key: PublicKey,
-    pub receiver_public_key: PublicKey,
+    /// Receiver key `Ko`, as raw compressed bytes.
+    ///
+    /// Like `Ke`, consensus does not require `Ko` to be a curve point. Parse with
+    /// [`Self::receiver_key`].
+    pub receiver_public_key: [u8; 33],
     pub message: OutputMessage,
     pub range_proof: [u8; 675],
     pub signature: [u8; 64],
+}
+
+impl Output {
+    /// `Ko` as a curve point; fails for encodings that are not one.
+    pub fn receiver_key(&self) -> Result<PublicKey, secp256k1::Error> {
+        PublicKey::from_slice(&self.receiver_public_key)
+    }
 }
 
 /// An MWEB input (spending a previously-created [`Output`]).
@@ -423,9 +446,7 @@ impl Decodable for Output {
         let sender_bytes: [u8; 33] = Decodable::consensus_decode(r)?;
         let sender_public_key = PublicKey::from_slice(&sender_bytes)
             .map_err(|_| encode::Error::ParseFailed("invalid output sender_public_key"))?;
-        let receiver_bytes: [u8; 33] = Decodable::consensus_decode(r)?;
-        let receiver_public_key = PublicKey::from_slice(&receiver_bytes)
-            .map_err(|_| encode::Error::ParseFailed("invalid output receiver_public_key"))?;
+        let receiver_public_key: [u8; 33] = Decodable::consensus_decode(r)?;
         let message = OutputMessage::consensus_decode_from_finite_reader(r)?;
         let range_proof: [u8; 675] = Decodable::consensus_decode(r)?;
         let signature: [u8; 64] = Decodable::consensus_decode(r)?;
@@ -445,7 +466,7 @@ impl Encodable for Output {
         let mut len = 0;
         len += self.commitment.consensus_encode(w)?;
         len += self.sender_public_key.serialize().consensus_encode(w)?;
-        len += self.receiver_public_key.serialize().consensus_encode(w)?;
+        len += self.receiver_public_key.consensus_encode(w)?;
         len += self.message.consensus_encode(w)?;
         len += self.range_proof.consensus_encode(w)?;
         len += self.signature.consensus_encode(w)?;
@@ -459,9 +480,7 @@ impl Decodable for OutputMessage {
     ) -> Result<Self, encode::Error> {
         let features = u8::consensus_decode(r)?;
         let standard_fields = if features & OutputFeatures::StandardFieldsFeatureBit as u8 != 0 {
-            let bytes: [u8; 33] = Decodable::consensus_decode(r)?;
-            let key_exchange_pubkey = PublicKey::from_slice(&bytes)
-                .map_err(|_| encode::Error::ParseFailed("invalid output key_exchange_pubkey"))?;
+            let key_exchange_pubkey: [u8; 33] = Decodable::consensus_decode(r)?;
             let view_tag = u8::consensus_decode(r)?;
             let masked_value = u64::consensus_decode(r)?;
             let masked_nonce: [u8; 16] = Decodable::consensus_decode(r)?;
@@ -488,7 +507,7 @@ impl Encodable for OutputMessage {
         let mut len = 0;
         len += self.features.consensus_encode(w)?;
         if let Some(fields) = &self.standard_fields {
-            len += fields.key_exchange_pubkey.serialize().consensus_encode(w)?;
+            len += fields.key_exchange_pubkey.consensus_encode(w)?;
             len += fields.view_tag.consensus_encode(w)?;
             len += fields.masked_value.consensus_encode(w)?;
             len += fields.masked_nonce.consensus_encode(w)?;
@@ -575,6 +594,45 @@ mod tests {
             let decoded = read_amount(&mut &buf[..]).unwrap();
             assert_eq!(decoded, amount, "decode mismatch for {amount}");
         }
+    }
+
+    /// Core consensus accepts outputs whose `Ko` and `Ke` are not curve points, so the decoder
+    /// must too; only the checked accessors may reject them.
+    #[test]
+    fn output_with_off_curve_ko_and_ke_decodes() {
+        let sk = secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap();
+        let ks = PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &sk);
+        let mut off_curve = [0u8; 33];
+        off_curve[0] = 0x02;
+        off_curve[32] = (1u8..=255)
+            .find(|x| {
+                off_curve[32] = *x;
+                PublicKey::from_slice(&off_curve).is_err()
+            })
+            .unwrap();
+        let output = Output {
+            commitment: [8; 33],
+            sender_public_key: ks,
+            receiver_public_key: off_curve,
+            message: OutputMessage {
+                features: OutputFeatures::StandardFieldsFeatureBit as u8,
+                standard_fields: Some(OutputMessageStandardFields {
+                    key_exchange_pubkey: off_curve,
+                    view_tag: 1,
+                    masked_value: 2,
+                    masked_nonce: [3; 16],
+                }),
+                extra_data: vec![],
+            },
+            range_proof: [4; 675],
+            signature: [5; 64],
+        };
+        let bytes = serialize(&output);
+        let decoded: Output = deserialize(&bytes).unwrap();
+        assert_eq!(decoded, output);
+        assert_eq!(serialize(&decoded), bytes);
+        assert!(decoded.receiver_key().is_err());
+        assert!(decoded.message.standard_fields.unwrap().key_exchange_key().is_err());
     }
 
     #[test]
