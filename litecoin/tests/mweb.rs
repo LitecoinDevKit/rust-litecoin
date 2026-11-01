@@ -10,6 +10,7 @@
 
 use litecoin::blockdata::mimblewimble::{KernelFeatures, OutputFeatures};
 use litecoin::consensus::{deserialize, serialize};
+use litecoin::hashes::Hash;
 use litecoin::hex::FromHex;
 use litecoin::secp256k1::PublicKey;
 use litecoin::{
@@ -175,6 +176,74 @@ fn hogex_block_decodes_and_roundtrips() {
 
     // Full round-trip.
     assert_eq!(serialize(&block), block_bytes, "block round-trip mismatch");
+}
+
+/// Parses Core rejects: the witness flag with no witnesses alongside MWEB ("Superfluous witness
+/// record"), and an MWEB presence byte other than 0 or 1.
+#[test]
+fn rejects_superfluous_witness_flag_and_bad_mweb_presence_byte() {
+    use litecoin::blockdata::mimblewimble::{Kernel, Transaction as MwTx, TxBody};
+    use litecoin::{absolute, transaction, Amount, ScriptBuf, Transaction, TxOut};
+
+    let mweb_only = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+        mw_tx: Some(MwTx {
+            kernel_offset: [1; 32],
+            stealth_offset: [2; 32],
+            body: TxBody {
+                inputs: vec![],
+                outputs: vec![],
+                kernels: vec![Kernel {
+                    features: 0,
+                    fee: None,
+                    pegin: None,
+                    pegouts: vec![],
+                    lock_height: None,
+                    stealth_excess: None,
+                    extra_data: vec![],
+                    excess: [8; 33],
+                    signature: [9; 64],
+                }],
+            },
+        }),
+        is_hog_ex: false,
+    };
+    let mut bytes = serialize(&mweb_only);
+    assert_eq!(deserialize::<Transaction>(&bytes).unwrap(), mweb_only);
+    assert_eq!(bytes[5], 0x08, "flag byte follows version and marker");
+    bytes[5] = 0x09;
+    assert!(deserialize::<Transaction>(&bytes).is_err());
+
+    let hogex = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut { value: Amount::from_sat(1), script_pubkey: ScriptBuf::new() }],
+        mw_tx: None,
+        is_hog_ex: true,
+    };
+    let mut bytes = serialize(&hogex);
+    assert_eq!(deserialize::<Transaction>(&bytes).unwrap(), hogex);
+    let presence = bytes.len() - 5;
+    assert_eq!(bytes[presence], 0);
+    bytes[presence] = 2;
+    assert!(deserialize::<Transaction>(&bytes).is_err());
+}
+
+/// Core's witness hash excludes MWEB data (`SERIALIZE_NO_MWEB`) and is the txid for a transaction
+/// without witnesses, the HogEx included, so the coinbase witness commitment of a real MWEB block
+/// must verify.
+#[test]
+fn hogex_block_witness_commitment_verifies() {
+    let block_bytes =
+        Vec::<u8>::from_hex(include_str!("data/hogex_block.txt").trim()).expect("hex");
+    let block: Block = deserialize(&block_bytes).expect("decode hogex block");
+    let hogex = block.txdata.last().unwrap();
+    assert_eq!(hogex.compute_wtxid().to_byte_array(), hogex.compute_txid().to_byte_array());
+    assert!(block.check_witness_commitment());
 }
 
 /// Core reads the MWEB extension block whenever the last transaction is a HogEx; the header

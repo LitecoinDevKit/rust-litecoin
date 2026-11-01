@@ -506,6 +506,8 @@ impl Encodable for OutputMessage {
     fn consensus_encode<W: Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
         let mut len = 0;
         len += self.features.consensus_encode(w)?;
+        // Written when present, so encoding cannot fail. The decoder reads them when the
+        // feature bit is set; a decoded or extracted message always has the two agree.
         if let Some(fields) = &self.standard_fields {
             len += fields.key_exchange_pubkey.consensus_encode(w)?;
             len += fields.view_tag.consensus_encode(w)?;

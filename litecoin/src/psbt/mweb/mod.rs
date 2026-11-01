@@ -31,6 +31,37 @@ pub(crate) fn ensure_index<T: Default>(vec: &mut Vec<T>, index: usize) {
     }
 }
 
+/// Merge `theirs` into `ours`, pairing maps by `key` (output id, commitment, excess) rather than by
+/// position: signers may reorder MWEB inputs and outputs (they are sorted by id when signed), so
+/// position alone can pair one input's signature with another's id. A map without the key, or
+/// whose key `ours` lacks, falls back to the same position when that slot has no key either;
+/// otherwise it is appended.
+pub(crate) fn combine_by_key<T: Default, K: PartialEq>(
+    ours: &mut Vec<T>,
+    theirs: Vec<T>,
+    key: impl Fn(&T) -> Option<K>,
+    merge: impl Fn(&mut T, T),
+) {
+    for (i, map) in theirs.into_iter().enumerate() {
+        let their_key = key(&map);
+        let matched = their_key
+            .as_ref()
+            .and_then(|k| ours.iter().position(|m| key(m).as_ref() == Some(k)));
+        let slot = matched.or_else(|| match ours.get(i) {
+            Some(m) if key(m).is_none() => Some(i),
+            None if their_key.is_none() => {
+                ensure_index(ours, i);
+                Some(i)
+            }
+            _ => None,
+        });
+        match slot {
+            Some(j) => merge(&mut ours[j], map),
+            None => ours.push(map),
+        }
+    }
+}
+
 /// Most MWEB inputs a consensus-valid transaction can carry (Core `mw::MAX_NUM_INPUTS`).
 pub const MAX_MWEB_PSBT_INPUTS: usize = 50_000;
 /// Most MWEB outputs: Core `mw::MAX_BLOCK_WEIGHT` (200,000) over the lightest output (17).
@@ -93,6 +124,39 @@ mod tests {
                 let decoded = Psbt::deserialize(&psbt.serialize());
                 assert_eq!(decoded.is_ok(), ok, "type {type_value:#04x} index {idx}");
             }
+        }
+    }
+
+    /// Signing sorts MWEB inputs by output id, so combining the funded PSBT with the signed one
+    /// must pair maps by id, not by position.
+    #[test]
+    fn combine_pairs_mweb_inputs_by_output_id() {
+        use crate::blockdata::transaction::{Transaction, Version};
+        use crate::psbt::Psbt;
+
+        let unsigned = Transaction {
+            version: Version::TWO,
+            lock_time: crate::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+            mw_tx: None,
+            is_hog_ex: false,
+        };
+        let input = |id: u8, sig: Option<u8>| MwebInput {
+            output_id: Some([id; 32]),
+            signature: sig.map(|s| vec![s; 64]),
+            ..MwebInput::default()
+        };
+        let mut funded = Psbt::from_unsigned_tx(unsigned.clone()).unwrap();
+        funded.mweb_inputs = vec![input(2, None), input(1, None)];
+        let mut signed = Psbt::from_unsigned_tx(unsigned).unwrap();
+        signed.mweb_inputs = vec![input(1, Some(0x11)), input(2, Some(0x22))];
+
+        funded.combine(signed).unwrap();
+        assert_eq!(funded.mweb_inputs.len(), 2);
+        for inp in &funded.mweb_inputs {
+            let id = inp.output_id.unwrap()[0];
+            assert_eq!(inp.signature.as_ref().unwrap()[0], id * 0x11, "input {id}");
         }
     }
 
@@ -229,7 +293,7 @@ mod tests {
         let kernel = MwebKernel {
             excess_commit: Some(excess),
             fee: Some(1000),
-            features: Some(0),
+            features: Some(0x01), // fee bit
             signature: Some([0u8; 64]),
             ..MwebKernel::default()
         };

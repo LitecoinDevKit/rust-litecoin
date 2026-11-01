@@ -365,18 +365,24 @@ impl Psbt {
         if self.mweb_stealth_offset.is_none() {
             self.mweb_stealth_offset = other.mweb_stealth_offset;
         }
-        for (i, other_kernel) in other.mweb_kernels.into_iter().enumerate() {
-            mweb::ensure_index(&mut self.mweb_kernels, i);
-            self.mweb_kernels[i].combine(other_kernel);
-        }
-        for (i, other_inp) in other.mweb_inputs.into_iter().enumerate() {
-            mweb::ensure_index(&mut self.mweb_inputs, i);
-            self.mweb_inputs[i].combine(other_inp);
-        }
-        for (i, other_out) in other.mweb_outputs.into_iter().enumerate() {
-            mweb::ensure_index(&mut self.mweb_outputs, i);
-            self.mweb_outputs[i].combine(other_out);
-        }
+        mweb::combine_by_key(
+            &mut self.mweb_kernels,
+            other.mweb_kernels,
+            |k| k.excess_commit,
+            |a, b| a.combine(b),
+        );
+        mweb::combine_by_key(
+            &mut self.mweb_inputs,
+            other.mweb_inputs,
+            |i| i.output_id,
+            |a, b| a.combine(b),
+        );
+        mweb::combine_by_key(
+            &mut self.mweb_outputs,
+            other.mweb_outputs,
+            |o| o.commit,
+            |a, b| a.combine(b),
+        );
 
         for (self_input, other_input) in self.inputs.iter_mut().zip(other.inputs.into_iter()) {
             self_input.combine(other_input);
@@ -2562,7 +2568,7 @@ mod tests {
         let kernel = MwebKernel {
             excess_commit: Some(excess),
             fee: Some(5000),
-            features: Some(0),
+            features: Some(0x01), // fee bit
             signature: Some([0u8; 64]),
             ..MwebKernel::default()
         };
@@ -2718,7 +2724,7 @@ mod tests {
             mweb_kernels: vec![MwebKernel {
                 excess_commit: Some(excess),
                 fee: Some(100),
-                features: Some(0),
+                features: Some(0x01), // fee bit
                 signature: Some([0u8; 64]),
                 ..MwebKernel::default()
             }],

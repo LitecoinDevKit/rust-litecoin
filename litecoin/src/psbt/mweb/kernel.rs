@@ -243,7 +243,15 @@ pub fn pegout_coin_from_psbt_value(raw: &[u8]) -> Result<crate::blockdata::mimbl
         return Err(Error::IncompleteMwebMaps("kernel pegout value too short"));
     }
     let amount = i64::from_le_bytes(raw[..8].try_into().unwrap());
-    let script_pub_key = deserialize(&raw[8..]).map_err(Error::ConsensusEncoding)?;
+    if amount < 0 {
+        return Err(Error::IncompleteMwebMaps("kernel pegout amount is negative"));
+    }
+    let script_pub_key: crate::ScriptBuf =
+        deserialize(&raw[8..]).map_err(Error::ConsensusEncoding)?;
+    // Core's PegOutCoin unserialize rejects an empty destination.
+    if script_pub_key.is_empty() {
+        return Err(Error::IncompleteMwebMaps("kernel pegout script is empty"));
+    }
     Ok(crate::blockdata::mimblewimble::PegOutCoin {
         amount,
         script_pub_key,

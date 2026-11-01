@@ -822,10 +822,33 @@ impl Transaction {
     /// Hashes the transaction **including** all segwit data (i.e. the marker, flag bytes, and the
     /// witness fields themselves). For non-segwit transactions which do not have any segwit data,
     /// this will be equal to [`Transaction::txid()`].
+    ///
+    /// Litecoin Core (`CTransaction::ComputeWitnessHash`) excludes MWEB data: a transaction
+    /// without witnesses hashes to its txid, and one with witnesses is hashed with only the
+    /// segwit flag. This matches Core for every transaction a block carries, including the
+    /// HogEx. For an MWEB-only transaction Core's txid and wtxid are both the first kernel's
+    /// BLAKE3 hash, which this crate does not compute; this method then hashes the full
+    /// serialization, so distinct MWEB-only transactions still get distinct ids.
     #[doc(alias = "wtxid")]
     pub fn compute_wtxid(&self) -> Wtxid {
+        let has_witnesses = self.input.iter().any(|i| !i.witness.is_empty());
+        let mweb_only = self.mw_tx.is_some() && self.input.is_empty() && self.output.is_empty();
         let mut enc = Wtxid::engine();
-        self.consensus_encode(&mut enc).expect("engines don't error");
+        if has_witnesses {
+            self.version.consensus_encode(&mut enc).expect("engines don't error");
+            SEGWIT_MARKER.consensus_encode(&mut enc).expect("engines don't error");
+            FLAGS_SEGWIT.consensus_encode(&mut enc).expect("engines don't error");
+            self.input.consensus_encode(&mut enc).expect("engines don't error");
+            self.output.consensus_encode(&mut enc).expect("engines don't error");
+            for input in &self.input {
+                input.witness.consensus_encode(&mut enc).expect("engines don't error");
+            }
+            self.lock_time.consensus_encode(&mut enc).expect("engines don't error");
+        } else if mweb_only {
+            self.consensus_encode(&mut enc).expect("engines don't error");
+        } else {
+            return Wtxid::from_byte_array(self.compute_txid().to_byte_array());
+        }
         Wtxid::from_engine(enc)
     }
 
@@ -1333,7 +1356,11 @@ impl Decodable for Transaction {
                 for txin in input.iter_mut() {
                     txin.witness = Decodable::consensus_decode_from_finite_reader(r)?;
                 }
-                if !input.is_empty() && input.iter().all(|i| i.witness.is_empty()) {
+                // Core throws "Superfluous witness record" for any of these. The empty-input,
+                // segwit-only case stays accepted: it is how this crate encodes a transaction
+                // with no inputs (BIP-141 disambiguation).
+                let no_witness = input.iter().all(|i| i.witness.is_empty());
+                if no_witness && (!input.is_empty() || segwit_flag & FLAGS_MWEB_TX != 0) {
                     return Err(encode::Error::ParseFailed(
                         "witness flag set but no witnesses present",
                     ));
@@ -1343,8 +1370,13 @@ impl Decodable for Transaction {
             let mut mw_tx: Option<mimblewimble::Transaction> = None;
             let mut is_hog_ex = false;
             if segwit_flag & FLAGS_MWEB_TX != 0 {
+                // Core's optional-pointer serialization: 1 means present, anything else absent.
+                // Reject 2-255 rather than guess, since Core would read what follows differently.
                 let is_mw_tx_present = u8::consensus_decode_from_finite_reader(r)?;
-                if is_mw_tx_present != 0 {
+                if is_mw_tx_present > 1 {
+                    return Err(encode::Error::ParseFailed("invalid MWEB presence byte"));
+                }
+                if is_mw_tx_present == 1 {
                     mw_tx = Some(mimblewimble::Transaction::consensus_decode_from_finite_reader(r)?);
                 } else {
                     // HogEx: flag bit set, no embedded MW body. Litecoin Core's
